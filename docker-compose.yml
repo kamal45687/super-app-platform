@@ -1,0 +1,334 @@
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: super_app
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schemas/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - super-app
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - super-app
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_INIT_LIMIT: 5
+    ports:
+      - '2181:2181'
+    networks:
+      - super-app
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    ports:
+      - '9092:9092'
+      - '29092:29092'
+    networks:
+      - super-app
+
+  # Kafka UI
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - '8080:8080'
+    networks:
+      - super-app
+
+  # Auth Service
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/super_app
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:-your-secret-key-change-in-production}
+      JWT_EXPIRY: 900
+      REFRESH_TOKEN_EXPIRY: 604800
+    ports:
+      - '3001:3001'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - super-app
+    restart: unless-stopped
+
+  # Parcel Service
+  parcel-service:
+    build:
+      context: ./services/parcel-service
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: development
+      PORT: 3002
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/super_app
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      SHIPROCKET_API_KEY: ${SHIPROCKET_API_KEY:-test-key}
+      SHIPROCKET_WEBHOOK_SECRET: ${SHIPROCKET_WEBHOOK_SECRET:-test-secret}
+      AUTH_SERVICE_URL: http://auth-service:3001
+      PAYMENT_SERVICE_URL: http://payment-service:3005
+    ports:
+      - '3002:3002'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - super-app
+    restart: unless-stopped
+
+  # Ride Service
+  ride-service:
+    build:
+      context: ./services/ride-service
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: development
+      PORT: 3003
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/super_app
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-test-key}
+      AUTH_SERVICE_URL: http://auth-service:3001
+      PAYMENT_SERVICE_URL: http://payment-service:3005
+    ports:
+      - '3003:3003'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - super-app
+    restart: unless-stopped
+
+  # Ticket Service
+  ticket-service:
+    build:
+      context: ./services/ticket-service
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: development
+      PORT: 3004
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/super_app
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      IRCTC_API_KEY: ${IRCTC_API_KEY:-test-key}
+      IRCTC_API_URL: https://railrestapi.herokuapp.com
+      AUTH_SERVICE_URL: http://auth-service:3001
+      PAYMENT_SERVICE_URL: http://payment-service:3005
+    ports:
+      - '3004:3004'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - super-app
+    restart: unless-stopped
+
+  # Payment Service
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: development
+      PORT: 3005
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/super_app
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      RAZORPAY_KEY_ID: ${RAZORPAY_KEY_ID:-test-key}
+      RAZORPAY_KEY_SECRET: ${RAZORPAY_KEY_SECRET:-test-secret}
+      RAZORPAY_WEBHOOK_SECRET: ${RAZORPAY_WEBHOOK_SECRET:-test-secret}
+      AUTH_SERVICE_URL: http://auth-service:3001
+    ports:
+      - '3005:3005'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - super-app
+    restart: unless-stopped
+
+  # Notification Service
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: development
+      PORT: 3006
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/super_app
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKERS: kafka:9092
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-test}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-test}
+      TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-+1234567890}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-test}
+    ports:
+      - '3006:3006'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    networks:
+      - super-app
+    restart: unless-stopped
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./infrastructure/monitoring/alert.rules.yml:/etc/prometheus/alert.rules.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    ports:
+      - '9090:9090'
+    networks:
+      - super-app
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infrastructure/monitoring/grafana-dashboards:/etc/grafana/provisioning/dashboards
+      - ./infrastructure/monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+    ports:
+      - '3000:3000'
+    depends_on:
+      - prometheus
+    networks:
+      - super-app
+
+  # Elasticsearch
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.9.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - '9200:9200'
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - super-app
+
+  # Kibana
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.9.0
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - '5601:5601'
+    depends_on:
+      - elasticsearch
+    networks:
+      - super-app
+
+  # API Gateway (NGINX)
+  api-gateway:
+    image: nginx:alpine
+    ports:
+      - '8000:8000'
+    volumes:
+      - ./infrastructure/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - auth-service
+      - parcel-service
+      - ride-service
+      - ticket-service
+      - payment-service
+      - notification-service
+    networks:
+      - super-app
+
+networks:
+  super-app:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+  elasticsearch_data:
